@@ -1,7 +1,6 @@
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
-from typing import Any
 
 from models import (
     InferenceLogModel,
@@ -9,7 +8,6 @@ from models import (
     LogStore,
     close_db,
     create_log_store,
-    get_db,
     init_db,
 )
 from services.extraction import extract_metadata
@@ -29,8 +27,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Inference Logging Ingestion Service", lifespan=lifespan)
 
 
-def get_log_store(db: Any = Depends(get_db)) -> LogStore:
-    return create_log_store(db)
+def get_log_store() -> LogStore:
+    return create_log_store()
 
 
 @app.post("/api/ingest/logs")
@@ -92,5 +90,4 @@ async def ingest_logs(payload: IngestPayload, log_store: LogStore = Depends(get_
 def publish_event(event_name: str, log: InferenceLogModel) -> None:
     """Placeholder hook for event bus integration."""
     return None
-
 
