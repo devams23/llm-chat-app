@@ -344,7 +344,7 @@ build/
 *.zip
 
 # Database backups
-*.sql
+
 *.sql.gz
 backups/
 db_backup/
