@@ -63,7 +63,7 @@ class LogStore(Protocol):
         ...
 
 
-class SupabaseLogStore:
+class SupabaseLogStore():
     def __init__(self, client: Client, table_name: str) -> None:
         self.client = client
         self.table_name = table_name
