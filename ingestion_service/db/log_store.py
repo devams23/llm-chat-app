@@ -1,11 +1,10 @@
 from typing import Any, Dict, Iterable, List, Protocol
 
 from db.supabase_client import get_supabase_client, get_supabase_table
-from models import InferenceLogModel
 
 
 class LogStore(Protocol):
-    def save_logs(self, logs: Iterable[Dict[str, Any]]) -> List[InferenceLogModel]:
+    def save_logs(self, logs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         ...
 
 
@@ -14,14 +13,13 @@ class SupabaseLogStore:
         self.client = client
         self.table_name = table_name
 
-    def save_logs(self, logs: Iterable[Dict[str, Any]]) -> List[InferenceLogModel]:
+    def save_logs(self, logs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         records = [normalize_log_record(log) for log in logs]
         if not records:
             return []
 
         response = self.client.table(self.table_name).insert(records).execute()
-        inserted_records = response.data or records
-        return [InferenceLogModel(**record) for record in inserted_records]
+        return response.data or records
 
     def rollback(self) -> None:
         return None
@@ -29,10 +27,10 @@ class SupabaseLogStore:
 
 class FallbackLogStore:
     def __init__(self) -> None:
-        self.items: List[InferenceLogModel] = []
+        self.items: List[Dict[str, Any]] = []
 
-    def save_logs(self, logs: Iterable[Dict[str, Any]]) -> List[InferenceLogModel]:
-        stored_logs = [InferenceLogModel(**normalize_log_record(log)) for log in logs]
+    def save_logs(self, logs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        stored_logs = [normalize_log_record(log) for log in logs]
         self.items.extend(stored_logs)
         return stored_logs
 
