@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List
 
-from models import IngestPayload, InferenceLogPayload
+from schemas.logs import IngestPayload, InferenceLogPayload
 
 
 VALID_STATUSES = {"success", "error", "failed", "timeout"}
