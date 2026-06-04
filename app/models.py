@@ -1,6 +1,9 @@
 # app/models.py
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, Boolean, Index
 from datetime import datetime
+from sqlalchemy.ext.declarative import declarative_base
+
+Base = declarative_base()
 
 class Conversation(Base):
     __tablename__ = "conversations"
