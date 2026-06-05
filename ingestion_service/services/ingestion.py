@@ -13,8 +13,6 @@ def prepare_logs_for_ingestion(payload: IngestPayload) -> List[Dict[str, Any]]:
     for log_data in payload.logs:
         log_dict = (
             log_data.model_dump()
-            if hasattr(log_data, "model_dump")
-            else log_data.dict()
         )
         extracted_metadata = extract_metadata(log_dict)
         redacted_log = redact_pii(log_dict)

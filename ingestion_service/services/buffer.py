@@ -42,6 +42,7 @@ class LogBuffer:
         self._log_store = log_store
         self._stop_event = asyncio.Event()
         self._worker_task = asyncio.create_task(
+            
             self._run_worker(log_store, max_batch_size, flush_interval_seconds)
         )
 

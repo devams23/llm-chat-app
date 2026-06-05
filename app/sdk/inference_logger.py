@@ -1,3 +1,4 @@
+import inspect
 import json
 import time
 import uuid
@@ -224,4 +225,4 @@ class LoggingDecorator:
                 # Use asyncio to send logs
                 asyncio.create_task(self.logger.log(log))
         
-        return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
+        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
