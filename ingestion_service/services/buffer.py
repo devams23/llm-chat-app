@@ -14,7 +14,7 @@ class BufferedLog:
 
 class LogBuffer:
     def __init__(self) -> None:
-        self.queue: asyncio.Queue[BufferedLog] = asyncio.Queue()
+        self.queue: asyncio.Queue[BufferedLog] = asyncio.Queue(maxsize=1000)
         self._worker_task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
         self._log_store: LogStore | None = None
