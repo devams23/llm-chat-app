@@ -1,6 +1,6 @@
 # AI Inference Observability Platform
 
-> Production-inspired observability platform for AI applications that captures, processes, stores, and analyzes LLM inference telemetry in near real-time.
+> observability platform for AI applications that captures, processes, stores, and analyzes LLM inference telemetry in near real-time.
 
 ---
 
@@ -40,7 +40,6 @@ This architecture is inspired by systems built by:
 - Arize Phoenix
 - Datadog
 - OpenTelemetry
-- OpenSearch Observability
 
 Modern observability systems separate:
 
@@ -50,22 +49,22 @@ Modern observability systems separate:
 4. Storage Layer
 5. Analytics Layer
 
-This allows ingestion and storage systems to scale independently. :contentReference[oaicite:0]{index=0}
+This separation allows ingestion and storage systems to scale independently.
 
 ---
 
 # Goals
 
-### Functional Goals
+## Functional Goals
 
 - Multi-turn AI chatbot
 - Inference metadata tracking
 - Conversation tracking
 - Centralized logging
-- Real-time ingestion
+- Near real-time ingestion
 - Historical analytics
 
-### Non-Functional Goals
+## Non-Functional Goals
 
 - Low request latency
 - High write throughput
@@ -76,86 +75,137 @@ This allows ingestion and storage systems to scale independently. :contentRefere
 
 ---
 
-# System Architecture
+# High-Level System Architecture
 
-```text
-┌─────────────────────┐
-│     React UI        │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│   Chat API Service  │
-│      FastAPI        │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Logging SDK Wrapper │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Ingestion Service   │
-│      FastAPI        │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│  In-Memory Buffer   │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│   Batch Worker      │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│     PostgreSQL      │
-└─────────────────────┘
+```mermaid
+flowchart TD
+
+    A[React Frontend]
+        --> B[FastAPI Chat Service]
+
+    B --> C[Logging SDK Wrapper]
+
+    C --> D[FastAPI Ingestion Service]
+
+    D --> E[Async Log Buffer]
+
+    E --> F[Background Batch Worker]
+
+    F --> G[(Supabase)]
+
+    G --> H[Analytics Queries]
+```
+
+---
+
+# Internal Log Processing Architecture
+
+The most important part of the system is the asynchronous log buffering pipeline.
+
+Instead of writing every inference event directly to the database, logs are first buffered in memory and written in batches.
+
+This significantly reduces:
+
+- Database round trips
+- Network overhead
+- Insert operations
+- Request latency
+
+---
+
+## Actual Runtime Flow
+
+```mermaid
+flowchart TD
+
+    A[Inference Event Created]
+        --> B[enqueue_many]
+
+    B --> C[Async Queue]
+
+    C --> D[Background Worker]
+
+    D --> E[queue.get]
+
+    E --> F[Active Batch]
+
+    F --> G{Batch Size Reached?}
+
+    G -->|Yes| H[Flush Batch]
+
+    G -->|No| I[Wait For More Logs]
+
+    I --> J{Flush Interval Reached?}
+
+    J -->|No| E
+
+    J -->|Yes| H
+
+    H --> K[Bulk Insert]
+
+    K --> L[(Supabase)]
+
+    K --> M{Insert Failed?}
+
+    M -->|No| N[Batch Cleared]
+
+    M -->|Yes| O{Retry Count < 1?}
+
+    O -->|Yes| P[Requeue Logs]
+
+    P --> C
+
+    O -->|No| Q[Drop Batch]
+
+    R[Application Shutdown]
+        --> S[flush_remaining]
+
+    S --> T[Drain Queue]
+
+    T --> U[Final Flush]
+
+    U --> L
 ```
 
 ---
 
 # Why This Architecture?
 
-A naive implementation would write every log directly to the database.
+A naive implementation writes every log immediately.
 
 ```text
-LLM Request
-      ↓
-Insert Log
-      ↓
+Inference Request
+        ↓
+Database Insert
+        ↓
 Commit
 ```
 
 Problems:
 
-- High database overhead
-- Increased request latency
-- Poor throughput
-- Connection exhaustion under load
+- High latency
+- Excessive database traffic
+- Increased connection usage
+- Poor scalability
 
-Instead, this system decouples ingestion from storage.
+Instead:
 
 ```text
-Receive Log
-      ↓
-Buffer
-      ↓
-Batch Insert
+Inference Request
+        ↓
+Queue
+        ↓
+Batch
+        ↓
+Bulk Insert
 ```
 
-This dramatically reduces:
+Benefits:
 
-- Database transactions
-- Network overhead
-- Disk flushes
-
-while improving throughput.
-
-Batching is a common optimization strategy in observability pipelines and telemetry systems. :contentReference[oaicite:1]{index=1}
+- Fewer write operations
+- Better throughput
+- Lower request latency
+- More efficient database utilization
 
 ---
 
@@ -165,12 +215,12 @@ Batching is a common optimization strategy in observability pipelines and teleme
 
 Responsible for:
 
-- Managing conversations
-- Maintaining context
-- Calling LLM providers
-- Returning responses to users
+- Conversation management
+- Context retention
+- LLM communication
+- Response generation
 
-The Chat Service never directly interacts with the database for observability data.
+The chat service is intentionally decoupled from telemetry persistence.
 
 ---
 
@@ -181,10 +231,10 @@ A lightweight wrapper around LLM providers.
 Responsibilities:
 
 - Measure latency
-- Track token usage
-- Capture errors
+- Capture token usage
+- Capture failures
 - Capture metadata
-- Generate traceable event payloads
+- Generate structured inference events
 
 Example:
 
@@ -192,7 +242,7 @@ Example:
 response = sdk.chat_completion(...)
 ```
 
-Captured Metadata:
+Generated telemetry:
 
 ```json
 {
@@ -209,75 +259,257 @@ Captured Metadata:
 
 ## 3. Ingestion Service
 
-Central entry point for all telemetry.
+Central entry point for telemetry events.
 
 Responsibilities:
 
-- Validate payloads
-- Parse metadata
-- Enrich events
-- Queue logs for processing
+- Request validation
+- Payload parsing
+- Metadata enrichment
+- Queueing logs
 
-The ingestion service acts as the boundary between producers and storage.
+The ingestion layer acts as the boundary between producers and storage.
 
 ---
 
-## 4. In-Memory Buffer
+## 4. Async Queue
 
-Stores incoming logs temporarily before persistence.
+Implementation:
+
+```python
+self.queue = asyncio.Queue()
+```
 
 Purpose:
 
-- Absorb traffic bursts
-- Reduce database load
-- Improve write throughput
+- Absorb traffic spikes
+- Decouple API requests from database writes
+- Prevent blocking database operations
 
-Logs are accumulated until:
+Incoming logs are immediately accepted and stored in memory.
 
 ```text
-Batch Size Reached
+Producer
+     ↓
+Async Queue
+```
 
-OR
+---
 
-Flush Interval Reached
+## 5. Active Batch
+
+Implementation:
+
+```python
+self._active_batch = []
+```
+
+Purpose:
+
+- Group multiple logs together
+- Prepare logs for bulk insertion
+
+Logs are moved from the queue into the active batch by the background worker.
+
+Example:
+
+```text
+Active Batch
+
+[
+  log1,
+  log2,
+  log3
+]
+```
+
+---
+
+## 6. Background Worker
+
+Runs continuously in the background.
+
+Responsibilities:
+
+- Consume logs from queue
+- Build batches
+- Flush batches
+- Retry failures
+
+Worker lifecycle:
+
+```text
+Queue
+  ↓
+Batch
+  ↓
+Bulk Insert
+```
+
+---
+
+# Batch Flush Strategy
+
+A flush occurs when either condition is met.
+
+## Condition 1: Batch Size Reached
+
+```python
+MAX_BATCH_SIZE = 100
 ```
 
 Example:
 
+```text
+100 Logs Collected
+        ↓
+Flush
+```
+
+---
+
+## Condition 2: Flush Timeout Reached
+
 ```python
-MAX_BATCH_SIZE = 100
 FLUSH_INTERVAL = 1 second
 ```
 
-This mirrors batching strategies commonly used in telemetry pipelines. :contentReference[oaicite:2]{index=2}
+Example:
+
+```text
+10 Logs Collected
+        ↓
+1 Second Passed
+        ↓
+Flush
+```
+
+This prevents logs from remaining in memory indefinitely during low traffic periods.
 
 ---
 
-## 5. Batch Worker
+# Example Runtime Walkthrough
 
-Background process responsible for:
+Configuration:
 
-- Reading buffered events
-- Bulk inserting records
-- Retrying failed writes
+```python
+MAX_BATCH_SIZE = 3
+FLUSH_INTERVAL = 5
+```
 
-Pseudo Flow:
+Incoming events:
 
 ```text
-Collect Logs
+log1
+log2
+log3
+log4
+```
+
+### Step 1
+
+Logs enter the queue.
+
+```text
+Queue
+
+[
+ log1,
+ log2,
+ log3,
+ log4
+]
+```
+
+### Step 2
+
+Worker consumes logs.
+
+```text
+Active Batch
+
+[
+ log1,
+ log2,
+ log3
+]
+```
+
+### Step 3
+
+Batch size threshold reached.
+
+```text
+Flush Triggered
+```
+
+### Step 4
+
+Worker performs bulk insert.
+
+```text
+[
+ log1,
+ log2,
+ log3
+]
       ↓
-Build Batch
+Supabase
+```
+
+### Step 5
+
+Remaining log stays in memory.
+
+```text
+[
+ log4
+]
+```
+
+### Step 6
+
+Timeout expires.
+
+```text
+5 Seconds
       ↓
-Bulk Insert
+Flush
       ↓
-Commit
+Supabase
 ```
 
 ---
 
-## Database Design
+# Storage Layer
 
-### conversations
+## Supabase
+
+Telemetry data is persisted using Supabase.
+
+Reasons:
+
+- Managed PostgreSQL backend
+- Built-in API layer
+- Authentication support
+- Simple deployment
+- Developer productivity
+
+The application interacts with Supabase through a dedicated storage layer.
+
+```text
+Batch Worker
+      ↓
+Log Store
+      ↓
+Supabase
+```
+
+---
+
+# Database Design
+
+## conversations
 
 ```sql
 CREATE TABLE conversations (
@@ -289,7 +521,7 @@ CREATE TABLE conversations (
 
 ---
 
-### messages
+## messages
 
 ```sql
 CREATE TABLE messages (
@@ -303,7 +535,7 @@ CREATE TABLE messages (
 
 ---
 
-### inference_logs
+## inference_logs
 
 ```sql
 CREATE TABLE inference_logs (
@@ -333,69 +565,122 @@ CREATE TABLE inference_logs (
 
 ---
 
-# Logging Strategy
+# Failure Handling
 
-Every LLM call generates a telemetry event.
+## Database Failure
 
-Captured fields include:
-
-| Category | Examples |
-|-----------|-----------|
-| Metadata | Provider, Model |
-| Performance | Latency |
-| Usage | Tokens |
-| Reliability | Success, Failure |
-| Context | Session ID |
-| Cost | Token Consumption |
-
-This enables:
-
-- Cost monitoring
-- Latency analysis
-- Error analysis
-- Usage analytics
-
----
-
-# Scaling Considerations
-
-## Current Implementation
-
-Current architecture prioritizes simplicity.
+If a batch write fails:
 
 ```text
-SDK
- ↓
-HTTP
- ↓
-Ingestion Service
- ↓
-Buffer
- ↓
-Batch Worker
- ↓
-Postgres
+Batch Insert
+      ↓
+Failure
+      ↓
+Retry Once
+      ↓
+Requeue
 ```
 
-Advantages:
+Implementation:
 
-- Simple deployment
-- Easy debugging
-- Minimal infrastructure
-- Low operational overhead
+```python
+if item.retry_count < 1:
+    item.retry_count += 1
+    await self.queue.put(item)
+```
 
-Suitable for:
+Benefits:
 
-- Startups
-- Internal tooling
-- MVPs
-- Assignments
+- Handles transient failures
+- Avoids infinite retry loops
+- Preserves ingestion throughput
 
 ---
 
-# Future Architecture
+## Graceful Shutdown
 
-As traffic increases:
+Before application shutdown:
+
+```python
+await stop_worker()
+```
+
+The worker:
+
+1. Stops accepting work
+2. Flushes active batch
+3. Drains queue
+4. Performs final bulk insert
+
+```text
+Active Batch
+      +
+Remaining Queue
+      ↓
+Final Flush
+      ↓
+Supabase
+```
+
+This minimizes telemetry loss during service termination.
+
+---
+
+# Monitoring Metrics
+
+The platform tracks:
+
+## Throughput
+
+```text
+logs/sec
+```
+
+## Latency
+
+```text
+p50
+p95
+p99
+```
+
+## Reliability
+
+```text
+success rate
+error rate
+```
+
+## Usage
+
+```text
+tokens consumed
+requests per model
+```
+
+## Cost
+
+```text
+estimated spend per provider
+```
+
+---
+
+# Current Tradeoffs
+
+| Decision | Benefit | Tradeoff |
+|-----------|----------|----------|
+| Async Queue | Fast ingestion | Memory dependent |
+| In-Memory Buffer | Simple implementation | Potential loss on crash |
+| Batch Inserts | High throughput | Slight persistence delay |
+| Single Worker | Easy debugging | Limited horizontal scale |
+| Supabase | Fast development | Less control than self-hosted infrastructure |
+
+---
+
+# Future Evolution
+
+As traffic grows:
 
 ```text
 SDK
@@ -407,260 +692,16 @@ Consumer Group
 ClickHouse
 ```
 
----
-
-## Why Kafka?
-
-Kafka does not make databases faster.
-
-Kafka provides:
-
-- Durability
-- Backpressure handling
-- Replayability
-- Independent scaling
-
-Benefits:
-
-```text
-Producer Scale ≠ Consumer Scale
-```
-
-If database writes slow down:
-
-```text
-Kafka stores backlog
-Consumers catch up later
-```
-
----
-
-## Why ClickHouse?
-
-At scale, observability workloads become:
-
-```text
-Write Heavy
-Read Heavy
-Analytics Heavy
-```
-
-Traditional PostgreSQL eventually becomes expensive.
-
-ClickHouse is optimized for:
-
-- High ingestion throughput
-- Time-series queries
-- Log analytics
-- Aggregations
-
-Large observability platforms commonly use columnar analytics stores for these workloads. :contentReference[oaicite:3]{index=3}
-
----
-
-# Failure Handling
-
-## Current Assumptions
-
-### Ingestion Service Crash
-
-Risk:
-
-```text
-Buffered logs may be lost.
-```
-
-Tradeoff accepted for MVP simplicity.
-
----
-
-### Database Failure
-
-Batch worker:
-
-- Retries writes
-- Applies exponential backoff
-- Preserves batch until successful
-
----
-
-### Provider Failure
-
-Captured as:
-
-```json
-{
-  "status": "failed",
-  "error": "rate_limit_exceeded"
-}
-```
-
-This ensures observability for failed requests.
-
----
-
-# Future Reliability Improvements
-
-## Kafka
-
-Provides:
-
-- Durable storage
-- Event replay
-- Consumer recovery
-
----
-
-## Dead Letter Queue
-
-For permanently failed events.
-
-```text
-Failed Event
-      ↓
-DLQ
-      ↓
-Manual Investigation
-```
-
----
-
-## Redis Streams
-
-Alternative lightweight message broker.
-
-Useful when:
-
-- Kafka is operationally expensive
-- Traffic is moderate
-
----
-
-# Security Considerations
-
-## PII Redaction
-
-Future enhancement:
-
-Before persistence:
-
-```text
-User Prompt
-      ↓
-PII Detection
-      ↓
-Redaction
-      ↓
-Storage
-```
-
-Examples:
-
-```text
-john@gmail.com
-```
-
-becomes
-
-```text
-[REDACTED_EMAIL]
-```
-
----
-
-## Data Retention
-
-Future implementation:
-
-```text
-Hot Storage
-  30 Days
-
-Cold Storage
-  S3/Object Storage
-```
-
-Reduces storage cost.
-
----
-
-# Monitoring Metrics
-
-The platform tracks:
-
-### Throughput
-
-```text
-logs/sec
-```
-
-### Latency
-
-```text
-p50
-p95
-p99
-```
-
-### Reliability
-
-```text
-success rate
-error rate
-```
-
-### Usage
-
-```text
-tokens consumed
-requests per model
-```
-
-### Cost
-
-```text
-estimated spend per provider
-```
-
----
-
-# Tradeoffs Made
-
-| Decision | Benefit | Tradeoff |
-|-----------|----------|----------|
-| In-Memory Buffer | Simple | Potential data loss |
-| PostgreSQL | Easy setup | Limited analytical scale |
-| HTTP Ingestion | Simple integration | No durability |
-| Single Worker | Simplicity | Limited throughput |
-| No Kafka | Lower complexity | No replayability |
-
----
-
-# What I Would Build Next
-
-Priority 1:
+Potential improvements:
 
 - Kafka
-- Consumer Groups
-- DLQ
-
-Priority 2:
-
-- ClickHouse
-- Dashboards
-- Cost Analytics
-
-Priority 3:
-
-- OpenTelemetry Integration
+- Dead Letter Queues
+- Event Replay
+- ClickHouse Analytics
 - Distributed Tracing
-- Multi-Provider Routing
-
-Priority 4:
-
+- OpenTelemetry Integration
 - Kubernetes Deployment
-- Horizontal Autoscaling
-- Multi-Tenant Support
+- Horizontal Scaling
 
 ---
 
@@ -673,10 +714,10 @@ docker-compose up --build
 Services:
 
 ```text
-Frontend      : localhost:3000
-Chat API      : localhost:8000
-Ingestion API : localhost:8001
-Postgres      : localhost:5432
+Frontend          : localhost:3000
+Chat API          : localhost:8000
+Ingestion API     : localhost:8001
+Supabase Backend  : Cloud Hosted
 ```
 
 ---
@@ -685,13 +726,12 @@ Postgres      : localhost:5432
 
 This project demonstrates:
 
-- Event-driven thinking
-- Observability design
-- High-throughput ingestion
+- Event-driven architecture
+- AI observability patterns
+- Async processing
 - Batching strategies
 - Reliability tradeoffs
-- Database scaling
-- Future Kafka migration path
-- AI infrastructure engineering
+- Telemetry ingestion pipelines
+- Production-inspired AI infrastructure design
 
-Rather than building another chatbot, this project focuses on the operational challenges of running AI systems in production.
+Rather than focusing only on chatbot functionality, the project explores the operational challenges involved in running AI systems at scale.
